@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Dict 
+from typing import List, Dict, Optional
 
 @dataclass
 class SecurityGroupRule:
@@ -16,25 +16,25 @@ class SecurityGroup:
     description: str
     vpc_id: str
     inbound_rules: List[SecurityGroupRule]
-    outbound_rules: List[SecurityGroupRule]   
+    outbound_rules: List[SecurityGroupRule]
 
 @dataclass
 class CloudResource:
     resource_id: str
-    resource_type: str # e.g EC2, elb, rds
+    resource_type: str
     name: str
     public_ip: Optional[str]
     private_ip: Optional[str]
     security_groups: List[SecurityGroup]
     tags: Dict[str, str]
     vpc_id: str
-    
+
 @dataclass
 class ExposureFinding:
     resource: CloudResource
     exposed_port: int
     protocol: str
     cidr_range: str
-    security_grou: SecurityGroup
-    service_name: str # e.g SSH, HTTPm PostgreSQL
-    risk_level: str # e.g low, medium, high
+    security_group: SecurityGroup  # Fixed: was probably 'security_grou'
+    service_name: str
+    risk_level: str

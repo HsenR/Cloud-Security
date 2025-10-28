@@ -1,0 +1,88 @@
+{
+  "summary": {
+    "total_resources": 3,
+    "total_findings": 4,
+    "high_risk_findings": 4,
+    "medium_risk_findings": 0,
+    "low_risk_findings": 0
+  },
+  "inventory": [
+    {
+      "resource_id": "i-09ab82849ac8589df",
+      "type": "ec2",
+      "name": "test-vulnerable-instance",
+      "public_ip": "13.49.223.38",
+      "security_groups": [
+        "sg-0d5befb5ec023df33"
+      ]
+    },
+    {
+      "resource_id": "i-0cf5bdb73822f570c",
+      "type": "ec2",
+      "name": "test-secure-instance",
+      "public_ip": null,
+      "security_groups": [
+        "sg-0b8316bbc3ea2723f"
+      ]
+    },
+    {
+      "resource_id": "i-00a22cc89e9ab74ad",
+      "type": "ec2",
+      "name": "troubleshoot instance",
+      "public_ip": "13.62.124.167",
+      "security_groups": [
+        "sg-097cef95ae0a7930a"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "resource_id": "i-09ab82849ac8589df",
+      "resource_type": "ec2",
+      "resource_name": "test-vulnerable-instance",
+      "public_ip": "13.49.223.38",
+      "exposed_port": 5432,
+      "service": "PostgreSQL",
+      "protocol": "tcp",
+      "security_group": "sg-0d5befb5ec023df33",
+      "risk_level": "HIGH",
+      "cidr_range": "0.0.0.0/0"
+    },
+    {
+      "resource_id": "i-09ab82849ac8589df",
+      "resource_type": "ec2",
+      "resource_name": "test-vulnerable-instance",
+      "public_ip": "13.49.223.38",
+      "exposed_port": 22,
+      "service": "SSH",
+      "protocol": "tcp",
+      "security_group": "sg-0d5befb5ec023df33",
+      "risk_level": "HIGH",
+      "cidr_range": "0.0.0.0/0"
+    },
+    {
+      "resource_id": "i-09ab82849ac8589df",
+      "resource_type": "ec2",
+      "resource_name": "test-vulnerable-instance",
+      "public_ip": "13.49.223.38",
+      "exposed_port": 3389,
+      "service": "RDP",
+      "protocol": "tcp",
+      "security_group": "sg-0d5befb5ec023df33",
+      "risk_level": "HIGH",
+      "cidr_range": "0.0.0.0/0"
+    },
+    {
+      "resource_id": "i-00a22cc89e9ab74ad",
+      "resource_type": "ec2",
+      "resource_name": "troubleshoot instance",
+      "public_ip": "13.62.124.167",
+      "exposed_port": 22,
+      "service": "SSH",
+      "protocol": "tcp",
+      "security_group": "sg-097cef95ae0a7930a",
+      "risk_level": "HIGH",
+      "cidr_range": "0.0.0.0/0"
+    }
+  ]
+}

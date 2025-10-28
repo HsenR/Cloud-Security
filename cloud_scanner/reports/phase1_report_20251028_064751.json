@@ -1,0 +1,11 @@
+{
+  "summary": {
+    "total_resources": 0,
+    "total_findings": 0,
+    "high_risk_findings": 0,
+    "medium_risk_findings": 0,
+    "low_risk_findings": 0
+  },
+  "inventory": [],
+  "findings": []
+}
