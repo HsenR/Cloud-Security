@@ -5,7 +5,8 @@ Usage examples:
   python3 scripts/run_phase2.py --masscan --nmap --nmap-timing 4 --aggressive --masscan-rate 1500 --masscan-ports 1-65535
   python3 scripts/run_phase2.py --no-masscan --nmap --nmap-timing 3
 """
-
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import argparse
 from src.active_scanner import ActiveScanner
 
