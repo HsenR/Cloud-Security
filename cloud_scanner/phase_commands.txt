@@ -1,0 +1,34 @@
+3) How to configure masscan & nmap (where to edit / runtime overrides)
+In-code defaults
+
+Open src/active_scanner.py, top-of-file constants:
+
+DEFAULT_MASSCAN_RATE — default masscan rate (packets/sec)
+
+DEFAULT_MASSCAN_PATH — path to masscan binary (usually masscan)
+
+DEFAULT_NMAP_BASE_ARGS — default nmap args (-sV -Pn --version-intensity 5)
+
+AGGRESSIVE_NMAP_ARGS — additional args used when --aggressive is passed (-O --script vuln ...)
+
+DEFAULT_MAX_WORKERS — parallel nmap jobs
+
+CLI overrides (preferred)
+
+Use the runner flags:
+
+--masscan-rate 1500 sets the masscan rate when running.
+
+--masscan-ports "1-65535" to scan all ports (default) or a subset.
+
+--nmap-timing 4 sets nmap -T4 (0-5 allowed).
+
+--aggressive to enable -O and --script vuln.
+
+Environment variables
+
+You can also set:
+
+MASSCAN_RATE=500 environment variable (will be read on module import unless overridden by CLI logic).
+
+MASSCAN_PATH, NMAP_PATH, MAX_WORKERS env vars.
