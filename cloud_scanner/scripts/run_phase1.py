@@ -1,5 +1,8 @@
 # scripts/run_phase1.py
-
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)).replace('/scripts',''))
+from src.scanner import CloudSecurityScanner
 from src.scanner import CloudSecurityScanner
 from src.utils.report_writer import save_reports
 from src.utils import config
