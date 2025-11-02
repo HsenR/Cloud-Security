@@ -1,19 +1,30 @@
 #!/usr/bin/env python3
 """
-Active scanner module (masscan -> nmap pipeline) with support for --top-ports.
-Saves raw outputs and writes a compact JSON report to reports/phase2_report_<ts>.json.
+Active scanner module (masscan -> nmap) with internal-source-ip support and clean output.
+Writes raw outputs to reports/raw/ and final JSON to reports/phase2_report_<ts>.json.
 """
 
 import os
 import json
 import shlex
+import socket
 import subprocess
 from datetime import datetime
 from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Nice console output
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+except Exception:
+    Console = None
+
+console = Console() if Console else None
+
 # -----------------------
-# Defaults (tweak here or via CLI/env)
+# Defaults (tweak here or via env)
 # -----------------------
 DEFAULT_MASSCAN_PATH = os.getenv("MASSCAN_PATH", "masscan")
 DEFAULT_NMAP_PATH = os.getenv("NMAP_PATH", "nmap")
@@ -29,61 +40,108 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 os.makedirs(RAW_DIR, exist_ok=True)
 
 
-def run_cmd(cmd, cwd=None):
-    """Run a shell command (shlex.split) and print a short status line."""
-    print(f"[cmd] {cmd}")
+def short_print(msg, style=None):
+    if console:
+        console.print(msg, style=style)
+    else:
+        print(msg)
+
+
+def run_cmd(cmd, cwd=None, capture_output=False):
+    """Run a command, return (ok, stdout)."""
+    if console:
+        console.log(f"[grey][cmd][/grey] {cmd}")
+    else:
+        print(f"[cmd] {cmd}")
     try:
+        if capture_output:
+            out = subprocess.check_output(shlex.split(cmd), cwd=cwd, stderr=subprocess.STDOUT)
+            return True, out.decode(errors="ignore")
         subprocess.check_call(shlex.split(cmd), cwd=cwd)
-        return True
+        return True, ""
     except subprocess.CalledProcessError as e:
-        print(f"[error] Command failed: {e}")
-        return False
+        return False, getattr(e, "output", str(e))
 
 
-# -----------------------
-# Masscan wrapper (supports --top-ports)
-# -----------------------
-def run_masscan_on_targets(targets, ports=None, top_ports=None, rate=DEFAULT_MASSCAN_RATE,
-                           masscan_path=DEFAULT_MASSCAN_PATH, out_file=None):
+def detect_source_ip_for_target(target_ip):
     """
-    Run masscan.
-      - targets: list of IP strings
-      - ports: string like "22,80,443" or "1-65535" (mutually exclusive with top_ports)
-      - top_ports: integer N to use masscan --top-ports N (if provided)
-    Returns: dict ip -> [ports]
+    Determine a usable local source IP to reach target_ip.
+    Works by creating a UDP socket to target and reading the socket name.
+    Returns a single IPv4 address string or None.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        # connect UDP (no packets sent) to target on arbitrary port
+        s.connect((target_ip, 9))
+        src = s.getsockname()[0]
+        s.close()
+        return src
+    except Exception:
+        return None
+
+
+# -----------------------
+# Masscan wrapper (supports --top-ports or --ports and source-ip/adapter)
+# -----------------------
+def run_masscan_on_targets(targets,
+                           ports=None,
+                           top_ports=None,
+                           rate=DEFAULT_MASSCAN_RATE,
+                           masscan_path=DEFAULT_MASSCAN_PATH,
+                           source_ip=None,
+                           adapter=None):
+    """
+    Run masscan for given targets.
+    - targets: list of IPs (or CIDRs)
+    - ports: "22,80" or "1-65535" (mutually exclusive with top_ports)
+    - top_ports: integer N -> --top-ports N
+    - source_ip: string (important for internal scanning)
+    - adapter: interface name (optional)
+    Returns: discovered dict {ip: [ports]}
     """
     if not targets:
         return {}
 
-    out_file = out_file or os.path.join(RAW_DIR, f"masscan_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
-    target_arg = " ".join(targets)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    out_file = os.path.join(RAW_DIR, f"masscan_{ts}.json")
 
-    # build command: prefer top_ports if provided
+    # build base command
+    tgt = " ".join(targets)
+    cmd_parts = [masscan_path, tgt]
+
     if top_ports:
-        port_part = f"--top-ports {int(top_ports)}"
+        cmd_parts += ["--top-ports", str(int(top_ports))]
     elif ports:
-        port_part = f"--ports {ports}"
+        cmd_parts += ["--ports", str(ports)]
     else:
-        # default to top-ports 1000 for speed/signal
-        port_part = f"--top-ports 1000"
+        cmd_parts += ["--top-ports", "1000"]  # default: top 1000
 
-    cmd = f"{masscan_path} {target_arg} {port_part} --rate {rate} -oJ {out_file}"
-    print(f"[masscan] Running (may require sudo or capabilities): {cmd}")
-    ok = run_cmd(cmd)
+    cmd_parts += ["--rate", str(rate), "-oJ", out_file]
+
+    if source_ip:
+        cmd_parts += ["--source-ip", source_ip]
+    if adapter:
+        cmd_parts += ["--adapter", adapter]
+
+    cmd = " ".join(shlex.quote(p) for p in cmd_parts)
+
+    # Run masscan (we capture output into file; suppress huge stdout)
+    ok, out = run_cmd(cmd)
     if not ok:
-        print("[masscan] failed to run -> returning empty discovery set")
+        short_print(f"[masscan] failed to run: {out}", "bold red")
         return {}
 
-    # read JSON safely
+    # try parse JSON
     try:
         with open(out_file, "r") as fh:
-            text = fh.read().strip()
-            if not text:
-                print(f"[masscan] output file {out_file} is empty")
+            content = fh.read().strip()
+            if not content:
+                short_print(f"[masscan] output file {out_file} empty", "yellow")
                 return {}
-            data = json.loads(text)
+            data = json.loads(content)
     except Exception as e:
-        print(f"[masscan] could not parse output JSON: {e}")
+        short_print(f"[masscan] parse error: {e}", "yellow")
         return {}
 
     discovered = {}
@@ -96,34 +154,39 @@ def run_masscan_on_targets(targets, ports=None, top_ports=None, rate=DEFAULT_MAS
 
 
 # -----------------------
-# Nmap wrapper + parser (supports --top-ports)
+# Nmap wrapper + parser (supports top-ports)
 # -----------------------
-def run_nmap_on_target(ip, ports=None, top_ports=None, nmap_timing=3, nmap_extra_args=None,
-                       aggressive=False, nmap_path=DEFAULT_NMAP_PATH, out_prefix=None):
+def run_nmap_on_target(ip,
+                       ports=None,
+                       top_ports=None,
+                       nmap_timing=3,
+                       nmap_extra_args=None,
+                       aggressive=False,
+                       nmap_path=DEFAULT_NMAP_PATH):
     """
-    Run nmap for an IP.
-      - ports: comma-separated list or string like "22,80,443"
-      - top_ports: integer N -> use '--top-ports N' and don't pass -p
-    Returns: (xml_root, xml_filename)
+    Run nmap for a target ip.
+    - ports: comma string or list (used with -p)
+    - top_ports: integer N -> use --top-ports N (no -p)
+    Returns: (xml_root, xml_file)
     """
-    outfile_base = out_prefix or os.path.join(RAW_DIR, f"nmap_{ip.replace('.', '_')}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")
-    xml_file = f"{outfile_base}.xml"
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    out_base = os.path.join(RAW_DIR, f"nmap_{ip.replace('.', '_')}_{ts}")
+    xml_file = f"{out_base}.xml"
 
     nmap_extra_args = nmap_extra_args or DEFAULT_NMAP_BASE_ARGS
     aggressive_part = AGGRESSIVE_NMAP_ARGS if aggressive else ""
 
     if top_ports:
-        # use --top-ports N instead of -p
         cmd = f"{nmap_path} -T{nmap_timing} {nmap_extra_args} {aggressive_part} --top-ports {int(top_ports)} -oX {xml_file} {ip}"
     else:
-        # must have ports
         port_arg = ports if ports else "22,80,443"
+        if isinstance(port_arg, (list, set)):
+            port_arg = ",".join(map(str, sorted(list(port_arg))))
         cmd = f"{nmap_path} -T{nmap_timing} {nmap_extra_args} {aggressive_part} -p {port_arg} -oX {xml_file} {ip}"
 
-    print(f"[nmap] Running: {cmd}")
-    ok = run_cmd(cmd)
+    ok, out = run_cmd(cmd)
     if not ok:
-        raise RuntimeError(f"nmap failed for {ip}")
+        raise RuntimeError(out or "nmap failed")
 
     tree = ET.parse(xml_file)
     return tree.getroot(), xml_file
@@ -155,14 +218,13 @@ def parse_nmap_host(elem):
 
 
 # -----------------------
-# ActiveScanner class
+# ActiveScanner orchestrator (single entrypoint)
 # -----------------------
 class ActiveScanner:
-    def __init__(self, targets=None):
-        self.targets = targets or []
-        if not isinstance(self.targets, list):
-            raise ValueError("targets must be a list of IP strings")
-        print(f"[ActiveScanner] targets: {self.targets}")
+    def __init__(self, targets):
+        if not isinstance(targets, list):
+            raise ValueError("targets must be a list")
+        self.targets = targets
 
     def run(self,
             use_masscan=True,
@@ -173,97 +235,127 @@ class ActiveScanner:
             nmap_extra_args=None,
             nmap_top_ports=None,
             aggressive=False,
-            max_workers=None):
+            max_workers=None,
+            adapter=None,
+            source_ip_override=None):
         """
-        Orchestrates masscan discovery (optional) then nmap per-host.
-        - masscan_top_ports & nmap_top_ports: integer to use --top-ports N for respective tools.
-        - masscan_ports: explicit port list/range (ignored if masscan_top_ports provided).
-        - nmap_extra_args: string of extra nmap args (if None, default used).
+        Runs masscan then nmap and writes consolidated JSON report.
+        - source_ip_override: if set, use as source-ip for masscan; otherwise auto-detect per-target.
+        - adapter: optional interface to bind to masscan.
         """
-        report = {"scanned_at": datetime.utcnow().isoformat() + "Z",
-                  "config": {"use_masscan": use_masscan,
-                             "masscan_rate": masscan_rate or DEFAULT_MASSCAN_RATE,
-                             "masscan_ports": masscan_ports,
-                             "masscan_top_ports": masscan_top_ports,
-                             "nmap_timing": nmap_timing,
-                             "nmap_top_ports": nmap_top_ports,
-                             "aggressive": aggressive,
-                             "max_workers": max_workers or DEFAULT_MAX_WORKERS},
-                  "hosts": []}
+        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        report = {
+            "scanned_at": datetime.utcnow().isoformat() + "Z",
+            "config": {
+                "use_masscan": use_masscan,
+                "masscan_rate": masscan_rate or DEFAULT_MASSCAN_RATE,
+                "masscan_ports": masscan_ports,
+                "masscan_top_ports": masscan_top_ports,
+                "nmap_timing": nmap_timing,
+                "nmap_top_ports": nmap_top_ports,
+                "aggressive": aggressive,
+                "max_workers": max_workers or DEFAULT_MAX_WORKERS,
+                "adapter": adapter,
+                "source_ip_override": source_ip_override
+            },
+            "hosts": []
+        }
 
-        if not self.targets:
-            print("[ActiveScanner] no targets provided -> writing empty report")
-            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            out = os.path.join(REPORTS_DIR, f"phase2_report_{ts}.json")
-            with open(out, "w") as fh:
-                json.dump(report, fh, indent=2)
-            print(f"[ActiveScanner] empty report: {out}")
-            return report
+        short_print(Panel(f"🚀 Phase 2 Active Scan — {len(self.targets)} targets", style="bold green")) if console else print(f"Phase2: {len(self.targets)} targets")
 
-        # MASSCAN (optional)
-        discovered = {}
+        # Run per-target masscan (we auto-detect source-ip per-target if not provided)
+        discovered_total = {}
         if use_masscan:
-            discovered = run_masscan_on_targets(self.targets,
-                                               ports=masscan_ports,
-                                               top_ports=masscan_top_ports,
-                                               rate=masscan_rate or DEFAULT_MASSCAN_RATE)
-            print(f"[masscan] discovered ports for {len(discovered)} hosts")
+            for t in self.targets:
+                src_ip = source_ip_override or detect_source_ip_for_target(t)
+                if not src_ip:
+                    short_print(f"⚠️ Could not detect source IP for target {t}. Masscan may fail. Proceeding.", "yellow")
+                else:
+                    short_print(f"🔁 Running masscan for {t} (source-ip: {src_ip})", "cyan")
+                try:
+                    discovered = run_masscan_on_targets([t],
+                                                       ports=masscan_ports,
+                                                       top_ports=masscan_top_ports,
+                                                       rate=masscan_rate or DEFAULT_MASSCAN_RATE,
+                                                       masscan_path=DEFAULT_MASSCAN_PATH,
+                                                       source_ip=src_ip,
+                                                       adapter=adapter)
+                    if discovered:
+                        discovered_total.update(discovered)
+                        short_print(f"✅ masscan discovered {len(discovered.get(t,[]))} ports on {t}", "green")
+                    else:
+                        short_print(f"ℹ️ masscan discovered 0 ports on {t}", "yellow")
+                except Exception as e:
+                    short_print(f"⚠️ masscan error for {t}: {e}", "red")
 
-        # prepare per-ip port sets
+        # Prepare nmap port lists: prefer discovered ports; empty list will mean fallback to top-ports or default ports
         ip_portmap = {}
         for ip in self.targets:
-            if ip in discovered and discovered[ip]:
-                ip_portmap[ip] = discovered[ip]
+            if ip in discovered_total and discovered_total[ip]:
+                ip_portmap[ip] = discovered_total[ip]
             else:
-                ip_portmap[ip] = []  # empty means fallback to nmap_top_ports or default ports
+                ip_portmap[ip] = []  # empty -> fallback
 
-        # NMAP: run per-host (parallel)
+        # Run nmap per-host in parallel
         max_workers = max_workers or DEFAULT_MAX_WORKERS
-        print(f"[ActiveScanner] running nmap -T{nmap_timing}, top_ports={nmap_top_ports}, aggressive={aggressive}, workers={max_workers}")
+        short_print(f"🔎 Running nmap (T{nmap_timing}) on {len(ip_portmap)} hosts (workers={max_workers})", "cyan")
         with ThreadPoolExecutor(max_workers=max_workers) as exe:
             futures = {}
             for ip, ports in ip_portmap.items():
-                # determine what to tell nmap: prefer nmap_top_ports if provided, else use discovered ports or fallback default ports
                 if nmap_top_ports:
-                    # pass top-ports to nmap; ports arg is ignored
-                    futures[exe.submit(run_nmap_on_target, ip, None, nmap_top_ports, nmap_timing, nmap_extra_args, aggressive, DEFAULT_NMAP_PATH, None)] = (ip, f"top-{nmap_top_ports}")
+                    # pass top-ports to nmap
+                    futures[exe.submit(run_nmap_on_target, ip, None, nmap_top_ports, nmap_timing, nmap_extra_args, aggressive, DEFAULT_NMAP_PATH)] = (ip, f"top-{nmap_top_ports}")
                 else:
-                    port_arg = ",".join(map(str, ports)) if ports else "22,80,443"
-                    futures[exe.submit(run_nmap_on_target, ip, port_arg, None, nmap_timing, nmap_extra_args, aggressive, DEFAULT_NMAP_PATH, None)] = (ip, port_arg)
+                    port_arg = ports if ports else "22,80,443"
+                    futures[exe.submit(run_nmap_on_target, ip, port_arg, None, nmap_timing, nmap_extra_args, aggressive, DEFAULT_NMAP_PATH)] = (ip, port_arg)
 
             for fut in as_completed(futures):
                 ip, ports_scanned = futures[fut]
                 try:
-                    xml_root, xml_file = fut.result()
+                    xmlroot, xmlfile = fut.result()
                     host_entries = []
-                    for he in xml_root.findall("host"):
+                    for he in xmlroot.findall("host"):
                         parsed = parse_nmap_host(he)
                         if parsed.get("ports"):
                             host_entries.append(parsed)
-                    report["hosts"].append({"ip": ip, "ports_scanned": ports_scanned, "nmap_xml": xml_file, "nmap_results": host_entries})
+                    report["hosts"].append({"ip": ip, "ports_scanned": ports_scanned, "nmap_xml": xmlfile, "nmap_results": host_entries})
+                    short_print(f"✅ nmap finished {ip}", "green")
                 except Exception as e:
-                    print(f"[nmap] failed for {ip}: {e}")
+                    short_print(f"❌ nmap failed for {ip}: {e}", "red")
                     report["hosts"].append({"ip": ip, "ports_scanned": ports_scanned, "error": str(e)})
 
         # Save final report
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        out_file = os.path.join(REPORTS_DIR, f"phase2_report_{ts}.json")
+        out_file = os.path.join(REPORTS_DIR, f"phase2_report_{stamp}.json")
         with open(out_file, "w") as fh:
             json.dump(report, fh, indent=2)
 
-        # concise summary
-        print("\n=== Phase 2 Summary ===")
-        print(f"Targets scanned: {len(report['hosts'])}")
-        for h in report["hosts"]:
-            if "nmap_results" in h and h["nmap_results"]:
+        # Clean concise summary
+        if console:
+            table = Table(title="Phase 2 Summary", show_lines=False)
+            table.add_column("IP", style="cyan")
+            table.add_column("Open Ports", style="magenta")
+            table.add_column("Services / Version", style="green")
+
+            for host in report["hosts"]:
                 open_ports = []
-                for he in h["nmap_results"]:
-                    for p in he["ports"]:
+                svc_lines = []
+                for he in host.get("nmap_results", []):
+                    for p in he.get("ports", []):
+                        if p["state"] == "open":
+                            open_ports.append(str(p["port"]))
+                            svc_lines.append(f"{p['port']}/{p.get('service','')} {p.get('version','')}".strip())
+                table.add_row(host["ip"], ", ".join(sorted(open_ports)) if open_ports else "-", "\n".join(svc_lines) if svc_lines else "-")
+            console.print(table)
+            console.print(Panel(f"Report saved: {out_file}", style="bold blue"))
+        else:
+            print("=== Phase 2 Summary ===")
+            for host in report["hosts"]:
+                open_ports = []
+                for he in host.get("nmap_results", []):
+                    for p in he.get("ports", []):
                         if p["state"] == "open":
                             open_ports.append(p["port"])
-                print(f" - {h['ip']}: open ports -> {sorted(open_ports)}")
-            else:
-                print(f" - {h['ip']}: no open ports found (or error)")
-        print("========================\n")
-        print(f"[ActiveScanner] report: {out_file}")
+                print(f" - {host['ip']}: open ports -> {sorted(open_ports)}")
+            print(f"Report saved: {out_file}")
+
         return report
